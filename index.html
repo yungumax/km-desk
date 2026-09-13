@@ -358,7 +358,7 @@ async function verifyPassword(pw,salt,stored){return (await hashPassword(pw,salt
 /* 把下面两个常量填好即可启用；留空则退回原有「资料库 / 本地」模式，向后兼容 */
 var SUPABASE_URL="https://bfwkamooggnvnoxrkybx.supabase.co";      // 你的 Supabase 项目 URL，如 https://xxxx.supabase.co
 var SUPABASE_ANON="sb_publishable__jppnHZT9WHgoQXmXFje4Q_pkaqmlDf";     // 你的 anon / public key（公开安全，可写进前端）
-var SUPABASE_KMKEY="";    // 自定义长随机串：开启「校验请求头」RLS 策略后必填，配合 SQL 里的 x-km-key 校验；留空则不加该头（走 anon_all 宽松策略）
+var SUPABASE_KMKEY="0mTLOGZw41Yv4aFOY3un_bibnERm5mMEh1batE4WwzBjpx2o9WdF7g";    // 自定义长随机串：开启「校验请求头」RLS 策略后必填，配合 SQL 里的 x-km-key 校验；留空则不加该头（走 anon_all 宽松策略）
 function SB_ENABLED(){return !!(SUPABASE_URL&&SUPABASE_ANON);}
 var SESS_KEY=null;        // 当前登录账号的 AES 密钥（CryptoKey，仅存内存，不落盘）
 var lastPulledAt=null;    // 上次从云端拉取到的 updated_at（用于轮询去重）
