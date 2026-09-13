@@ -326,6 +326,7 @@ var cloudId=null;
 /* ============ 数据层 ============ */
 var KEY="wb_km_root";          // localStorage 离线缓存键（ROOT）
 var SKEY="wb_km_session";      // 本地会话键（仅本机，不上云）
+var UKEY="wb_km_ukey";         // 持久化会话密钥（按账号，用于刷新后免密自动恢复登录；退出登录即清除）
 var ROOT=null;                 // {v, accounts:{name:{salt,hash,libs:{id:libState},activeLib}}}
 var sess=null;                 // {user, lib} 当前登录（仅本地）
 var S=null;                    // 指向 ROOT.accounts[user].libs[lib]
@@ -358,8 +359,7 @@ async function verifyPassword(pw,salt,stored){return (await hashPassword(pw,salt
 /* 把下面两个常量填好即可启用；留空则退回原有「资料库 / 本地」模式，向后兼容 */
 var SUPABASE_URL="https://bfwkamooggnvnoxrkybx.supabase.co";      // 你的 Supabase 项目 URL，如 https://xxxx.supabase.co
 var SUPABASE_ANON="sb_publishable__jppnHZT9WHgoQXmXFje4Q_pkaqmlDf";     // 你的 anon / public key（公开安全，可写进前端）
-var SUPABASE_KMKEY="0mTLOGZw41Yv4aFOY3un_bibnERm5mMEh1batE4WwzBjpx2o9WdF7g
-";    // 自定义长随机串：开启「校验请求头」RLS 策略后必填，配合 SQL 里的 x-km-key 校验；留空则不加该头（走 anon_all 宽松策略）
+var SUPABASE_KMKEY="0mTLOGZw41Yv4aFOY3un_bibnERm5mMEh1batE4WwzBjpx2o9WdF7g";    // 自定义长随机串：开启「校验请求头」RLS 策略后必填，配合 SQL 里的 x-km-key 校验；留空则不加该头（走 anon_all 宽松策略）
 function SB_ENABLED(){return !!(SUPABASE_URL&&SUPABASE_ANON);}
 var SESS_KEY=null;        // 当前登录账号的 AES 密钥（CryptoKey，仅存内存，不落盘）
 var lastPulledAt=null;    // 上次从云端拉取到的 updated_at（用于轮询去重）
@@ -371,7 +371,30 @@ async function deriveKey(pw,saltB64){
   var base=await crypto.subtle.importKey("raw",enc.encode(pw),{name:"PBKDF2"},false,["deriveKey"]);
   return await crypto.subtle.deriveKey(
     {name:"PBKDF2",salt:b64ToBuf(saltB64),iterations:100000,hash:"SHA-256"},
-    base,{name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
+    base,{name:"AES-GCM",length:256},true,["encrypt","decrypt"]);
+}
+/* ---- 会话密钥持久化：刷新/重开免密自动恢复登录 ---- */
+async function persistSessionKey(user,key){
+  try{
+    if(!user||!key||!key.extractable)return;
+    var raw=await crypto.subtle.exportKey("raw",key);
+    var store={};try{store=JSON.parse(localStorage.getItem(UKEY))||{};}catch(e){}
+    store[user]=bufToB64(raw);
+    localStorage.setItem(UKEY,JSON.stringify(store));
+  }catch(e){}
+}
+async function restoreSessionKey(user){
+  try{
+    var store={};try{store=JSON.parse(localStorage.getItem(UKEY))||{};}catch(e){}
+    if(!user||!store[user])return null;
+    return await crypto.subtle.importKey("raw",b64ToBuf(store[user]),{name:"AES-GCM"},true,["encrypt","decrypt"]);
+  }catch(e){return null;}
+}
+function forgetSessionKey(user){
+  try{
+    var store={};try{store=JSON.parse(localStorage.getItem(UKEY))||{};}catch(e){}
+    if(user&&store&&store[user]){delete store[user];localStorage.setItem(UKEY,JSON.stringify(store));}
+  }catch(e){}
 }
 async function aesEncrypt(obj,key){
   var iv=crypto.getRandomValues(new Uint8Array(12));
@@ -399,7 +422,7 @@ async function sbGetAcc(name){
   return (arr&&arr.length)?arr[0]:null;
 }
 async function sbUpsertAcc(name,salt,payload){
-  var r=await fetch(sbTable(),{method:"POST",headers:sbHeaders({"Prefer":"resolution=merge-upsert,return=minimal"}),
+  var r=await fetch(sbTable()+"?on_conflict=username",{method:"POST",headers:sbHeaders({"Prefer":"resolution=merge-duplicates,return=minimal"}),
     body:JSON.stringify([{username:name,salt:salt,payload:payload,updated_at:new Date().toISOString()}])});
   if(!r.ok)throw new Error("upsert "+r.status);
 }
@@ -608,6 +631,7 @@ async function doRegister(){
       var payload=await aesEncrypt(acc,SESS_KEY);
       await sbUpsertAcc(name,acc.salt,payload);
       lastPulledAt=new Date().toISOString();
+      await persistSessionKey(name,SESS_KEY);   // 记住登录态，刷新后免密自动恢复
     }catch(e){ showInfo("注册失败","无法连接云端："+e.message); return; }
   }
   ROOT.accounts[name]=acc;
@@ -634,6 +658,7 @@ async function doLogin(){
       if(ROOT.accounts[name]){ SESS_KEY=await deriveKey(pw,ROOT.accounts[name].salt); acc=ROOT.accounts[name]; lastPulledAt=null; }
       else { showInfo("登录失败","无法连接云端，且本地无该账号数据"); return; }
     }
+    if(SESS_KEY)await persistSessionKey(name,SESS_KEY);   // 记住登录态，刷新后免密自动恢复
     ROOT.accounts[name]=acc;
     var lib=acc.activeLib&&acc.libs[acc.activeLib]?acc.activeLib:Object.keys(acc.libs)[0];
     sess={user:name,lib:lib};saveSession();S=curLib();ensureLib(S);
@@ -649,7 +674,7 @@ async function doLogin(){
   save();afterLogin();
 }
 function logout(){
-  stopSync();SESS_KEY=null;lastPulledAt=null;
+  stopSync();if(sess)forgetSessionKey(sess.user);SESS_KEY=null;lastPulledAt=null;
   sess=null;S=null;try{localStorage.removeItem(SKEY);}catch(e){}
   applyCurrentTheme();showLogin();
 }
@@ -1324,11 +1349,17 @@ function init(){
   bindUI();
   applyCurrentTheme();
   setSync("加载中");
-  loadCloudThen().then(function(){
+  loadCloudThen().then(async function(){
     if(dbReady() && typeof getDB().onUpdated==="function"){getDB().onUpdated(onDbUpdate);}
     if(!ROOT)ROOT=freshRoot();
     if(SB_ENABLED()){
-      showLogin();          // 方案B：必须输入密码才能解密云端数据，不自动登录
+      // 方案B：优先用持久化的会话密钥免密自动恢复登录；无则要求输入密码
+      var s0=restoreSession();
+      if(s0 && ROOT.accounts[s0.user] && ROOT.accounts[s0.user].libs[s0.lib]){
+        var k0=await restoreSessionKey(s0.user);
+        if(k0){ SESS_KEY=k0; sess=s0; S=curLib(); ensureLib(S); afterLogin(); sbPullAcc(); return; }
+      }
+      showLogin();
       return;
     }
     var s=restoreSession();
